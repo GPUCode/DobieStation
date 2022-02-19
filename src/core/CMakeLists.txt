@@ -3,7 +3,7 @@ set(TARGET Core)
 include(DobieHelpers)
 
 # Add all the source files
-add_library(${TARGET}
+set(SOURCES
     ee/interpreter/emotionasm.cpp
     ee/interpreter/emotiondisasm.cpp
     ee/interpreter/emotioninterpreter.cpp
@@ -86,10 +86,12 @@ add_library(${TARGET}
     sif.cpp
 )
 
+add_library(${TARGET} ${SOURCES})
+set_source_files_properties(${SOURCES} PROPERTIES COMPILE_FLAGS "-g -O0")
+
 # Link all the sources
 target_include_directories(${TARGET} PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 add_library(Dobie::Core ALIAS ${TARGET})
 
 # Add include directories
 target_link_libraries(${TARGET} ${CONAN_LIBS})
-dobie_cxx_compile_options(${TARGET})

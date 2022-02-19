@@ -1,11 +1,10 @@
-cmake_minimum_required(VERSION 3.10)
+cmake_minimum_required(VERSION 3.16)
 
 set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=native -flto")
 project(DobieStation)
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
-string(REPLACE "-O3" "-O2" CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE}") # fix Release build
-set(THREADS_PREFER_PTHREAD_FLAG ON) # -pthreads on GNU-like compilers
 
 # Setup conan CMake integration
 include(${CMAKE_BINARY_DIR}/conanbuildinfo.cmake)

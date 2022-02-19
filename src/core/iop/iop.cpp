@@ -69,6 +69,13 @@ namespace iop
                 }
                 
                 interpreter::interpret(*this, instr);
+
+                /* Detect calls to the putc function and handle them */
+                if (PC == 0x00012C48 || PC == 0x0001420C || PC == 0x0001430C)
+                {
+                    e->iop_puts();
+                }
+
                 PC += 4;
 
                 if (will_branch)

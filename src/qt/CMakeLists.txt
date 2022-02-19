@@ -1,6 +1,6 @@
 set(TARGET DobieQt)
 
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 20)
 
 set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
@@ -46,5 +46,6 @@ target_include_directories(${TARGET} PRIVATE
     ${CMAKE_SOURCE_DIR}/src
     ${Qt5Gui_PRIVATE_INCLUDE_DIRS})
 target_link_libraries(${TARGET} Dobie::Core Qt5::Core Qt5::Widgets Qt5::Gui)
+
 
 install(TARGETS DobieQt RUNTIME DESTINATION bin)

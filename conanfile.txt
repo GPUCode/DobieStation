@@ -2,5 +2,8 @@
 zlib/1.2.11
 fmt/8.1.1
 
+[options]
+fmt:header_only=True
+
 [generators]
 cmake

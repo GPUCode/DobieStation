@@ -1,7 +1,7 @@
-#include <algorithm>
-#include <cstdio>
-#include <cstdlib>
-#include "emotioninterpreter.hpp"
+#include <ee/interpreter/emotioninterpreter.hpp>
+#include <util/simd.hpp>
+#include <util/bit.hpp>
+#include <fmt/core.h>
 
 namespace ee
 {
@@ -252,26 +252,17 @@ namespace ee
             uint64_t dest = (instruction >> 11) & 0x1F;
             uint64_t reg = (instruction >> 21) & 0x1F;
 
-            uint32_t words[2];
-            words[0] = cpu.get_gpr<uint32_t>(reg);
-            words[1] = cpu.get_gpr<uint32_t>(reg, 1);
-
             for (int i = 0; i < 2; i++)
             {
-                bool high_bit = words[i] & (1 << 31);
-                uint8_t bits = 0;
-                for (int j = 30; j >= 0; j--)
-                {
-                    if ((words[i] & (1 << j)) == (high_bit << j))
-                        bits++;
-                    else
-                        break;
-                }
-                words[i] = bits;
+                uint32_t word = cpu.get_gpr<uint32_t>(reg, i);
+                bool msb = word & (1 << 31);
+                /* To count the leading ones, invert it so
+                   we can count zeros */
+                word = (msb ? ~word : word);
+                /* Passing zero to __builtin_clz produces undefined results.
+                   Thankfully when the number is zero the answer is always 0x1f */
+                cpu.set_gpr<uint32_t>(dest, util::count_leading_zeros(word), i);
             }
-
-            cpu.set_gpr<uint32_t>(dest, words[0]);
-            cpu.set_gpr<uint32_t>(dest, words[1], 1);
         }
 
         /**
@@ -453,7 +444,7 @@ namespace ee
             {
                 return 0x7FFF;
             }
-            else if (word < (int32_t)0xFFFF80000)
+            else if (word < (int32_t)0xFFFF8000)
             {
                 return 0x8000;
             }
@@ -589,23 +580,16 @@ namespace ee
         void pmfhlsh(EmotionEngine& cpu, uint32_t instruction)
         {
             uint64_t dest = (instruction >> 11) & 0x1F;
-            uint128_t lo, hi;
             uint128_t data;
 
-            lo._u64[0] = cpu.get_LO();
-            lo._u64[1] = cpu.get_LO1();
+            /* Load LO and HI to an AVX register */
+            auto lo_hi = simd::load<int32_t>(cpu.LO_HI);
+            auto clamped = simd::pack<uint16_t>(util::clamp_halfword_parallel(lo_hi));
+            
+            auto permute_mask = simd::load<uint32_t>({ 0, 4, 1, 5 });
+            auto result = simd::permute(simd::reinterpret<uint32_t>(clamped), permute_mask);
+            simd::store(result, &data);
 
-            hi._u64[0] = cpu.get_HI();
-            hi._u64[1] = cpu.get_HI1();
-
-            data._u16[0] = clamp_halfword(lo._u32[0]);
-            data._u16[1] = clamp_halfword(lo._u32[1]);
-            data._u16[2] = clamp_halfword(hi._u32[0]);
-            data._u16[3] = clamp_halfword(hi._u32[1]);
-            data._u16[4] = clamp_halfword(lo._u32[2]);
-            data._u16[5] = clamp_halfword(lo._u32[3]);
-            data._u16[6] = clamp_halfword(hi._u32[2]);
-            data._u16[7] = clamp_halfword(hi._u32[3]);
             cpu.set_gpr<uint128_t>(dest, data);
         }
 
@@ -801,12 +785,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 4; i++)
-            {
-                int32_t word = cpu.get_gpr<int32_t>(reg1, i);
-                word += cpu.get_gpr<int32_t>(reg2, i);
-                cpu.set_gpr<int32_t>(dest, word, i);
-            }
+            /* Copy the registers to load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int32_t>(rs);
+            auto qw2 = simd::load<int32_t>(rt);
+            auto result = qw1 + qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -820,12 +810,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 4; i++)
-            {
-                int32_t word = cpu.get_gpr<int32_t>(reg1, i);
-                word -= cpu.get_gpr<int32_t>(reg2, i);
-                cpu.set_gpr<int32_t>(dest, word, i);
-            }
+            /* Copy the register and load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int32_t>(rs);
+            auto qw2 = simd::load<int32_t>(rt);
+            auto result = qw1 - qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -838,19 +834,17 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            uint128_t qw1 = cpu.get_gpr<uint128_t>(reg1);
-            uint128_t qw2 = cpu.get_gpr<uint128_t>(reg2);
-            uint128_t dest_qw;
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
 
-            for (int i = 0; i < 4; i++)
-            {
-                if ((int32_t)qw1._u32[i] > (int32_t)qw2._u32[i])
-                    dest_qw._u32[i] = 0xFFFFFFFF;
-                else
-                    dest_qw._u32[i] = 0;
-            }
+            auto qw1 = simd::load<int32_t>(rs);
+            auto qw2 = simd::load<int32_t>(rt);
+            auto result = qw1 > qw2;
 
-            cpu.set_gpr<uint128_t>(dest, dest_qw);
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -863,14 +857,17 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 4; i++)
-            {
-                int32_t a = cpu.get_gpr<int32_t>(reg1, i), b = cpu.get_gpr<int32_t>(reg2, i);
-                if (a > b)
-                    cpu.set_gpr<int32_t>(dest, a, i);
-                else
-                    cpu.set_gpr<int32_t>(dest, b, i);
-            }
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int32_t>(rs);
+            auto qw2 = simd::load<int32_t>(rt);
+            auto result = simd::max(qw1, qw2);
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -882,12 +879,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 8; i++)
-            {
-                int16_t halfword = cpu.get_gpr<int16_t>(reg1, i);
-                halfword += cpu.get_gpr<int16_t>(reg2, i);
-                cpu.set_gpr<int16_t>(dest, halfword, i);
-            }
+            /* Copy the registers to load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int16_t>(rs);
+            auto qw2 = simd::load<int16_t>(rt);
+            auto result = qw1 + qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -899,12 +902,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 8; i++)
-            {
-                int16_t halfword = cpu.get_gpr<int16_t>(reg1, i);
-                halfword -= cpu.get_gpr<int16_t>(reg2, i);
-                cpu.set_gpr<int16_t>(dest, halfword, i);
-            }
+            /* Copy the registers to load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int16_t>(rs);
+            auto qw2 = simd::load<int16_t>(rt);
+            auto result = qw1 - qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -917,19 +926,17 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            uint128_t qw1 = cpu.get_gpr<uint128_t>(reg1);
-            uint128_t qw2 = cpu.get_gpr<uint128_t>(reg2);
-            uint128_t dest_qw;
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
 
-            for (int i = 0; i < 8; i++)
-            {
-                if ((int16_t)qw1._u16[i] > (int16_t)qw2._u16[i])
-                    dest_qw._u16[i] = 0xFFFF;
-                else
-                    dest_qw._u16[i] = 0;
-            }
+            auto qw1 = simd::load<int16_t>(rs);
+            auto qw2 = simd::load<int16_t>(rt);
+            auto result = qw1 > qw2;
 
-            cpu.set_gpr<uint128_t>(dest, dest_qw);
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -942,14 +949,17 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 8; i++)
-            {
-                int16_t a = cpu.get_gpr<int16_t>(reg1, i), b = cpu.get_gpr<int16_t>(reg2, i);
-                if (a > b)
-                    cpu.set_gpr<int16_t>(dest, a, i);
-                else
-                    cpu.set_gpr<int16_t>(dest, b, i);
-            }
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int16_t>(rs);
+            auto qw2 = simd::load<int16_t>(rt);
+            auto result = simd::max(qw1, qw2);
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -961,12 +971,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 16; i++)
-            {
-                int8_t byte = cpu.get_gpr<int8_t>(reg1, i);
-                byte += cpu.get_gpr<int8_t>(reg2, i);
-                cpu.set_gpr<int8_t>(dest, byte, i);
-            }
+            /* Copy the registers to load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int8_t>(rs);
+            auto qw2 = simd::load<int8_t>(rt);
+            auto result = qw1 + qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -980,12 +996,18 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            for (int i = 0; i < 16; i++)
-            {
-                int8_t byte = cpu.get_gpr<int8_t>(reg1, i);
-                byte -= cpu.get_gpr<int8_t>(reg2, i);
-                cpu.set_gpr<int8_t>(dest, byte, i);
-            }
+            /* Copy the registers to load them into AVX registers */
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
+
+            auto qw1 = simd::load<int8_t>(rs);
+            auto qw2 = simd::load<int8_t>(rt);
+            auto result = qw1 - qw2;
+
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
         /**
@@ -998,21 +1020,23 @@ namespace ee
             uint64_t reg2 = (instruction >> 16) & 0x1F;
             uint64_t dest = (instruction >> 11) & 0x1F;
 
-            uint128_t qw1 = cpu.get_gpr<uint128_t>(reg1);
-            uint128_t qw2 = cpu.get_gpr<uint128_t>(reg2);
-            uint128_t dest_qw;
+            uint128_t rs[2] = { cpu.get_gpr<uint128_t>(reg1), 0 };
+            uint128_t rt[2] = { cpu.get_gpr<uint128_t>(reg2), 0 };
+            uint128_t rd[2] = {};
 
-            for (int i = 0; i < 16; i++)
-            {
-                if ((int8_t)qw1._u8[i] > (int8_t)qw2._u8[i])
-                    dest_qw._u8[i] = 0xFF;
-                else
-                    dest_qw._u8[i] = 0;
-            }
+            auto qw1 = simd::load<int8_t>(rs);
+            auto qw2 = simd::load<int8_t>(rt);
+            auto result = qw1 > qw2;
 
-            cpu.set_gpr<uint128_t>(dest, dest_qw);
+            /* Store the result back */ 
+            simd::store(result, rd);
+            cpu.set_gpr<uint128_t>(dest, rd[0]);
         }
 
+        /**
+         * Parallel Extend Lower from Word
+         * Interleaves the words from RS and RT 
+         */
         void pextlw(EmotionEngine &cpu, uint32_t instruction)
         {
             uint64_t reg1 = (instruction >> 21) & 0x1F;
@@ -1237,6 +1261,18 @@ namespace ee
                 cpu.set_gpr<uint8_t>(dest, byte1, i + 8);
                 cpu.set_gpr<uint8_t>(dest, byte2, i);
             }
+            
+            /*
+            static uint8_t msk[32] = { 0, 2, 4, 6, 8, 10, 12, 14,
+                                      -1, -1, -1, -1, -1, -1, -1, -1, 
+                                       0, 2, 4, 6, 8, 10, 12, 14, 
+                                      -1, -1, -1, -1, -1, -1, -1, -1 };
+            auto mask = simd::load<uint8_t>(msk);
+
+            auto rs_rd = simd::load<uint8_t>(barr.data());
+            auto shuffled = simd::reinterpret<uint64_t>(simd::shuffle(rs_rd, mask));
+            auto r = simd::permute<0xf8>(shuffled);
+            */
         }
 
         /**
@@ -1257,6 +1293,18 @@ namespace ee
                 unpacked |= (packed & 0x1F) << 3;
                 cpu.set_gpr<uint32_t>(dest, unpacked, i);
             }
+            
+            /*  
+                auto rt = simd::load<uint32_t>(barr.data());
+
+                auto a0 = (rt & 0x1f) << 3;
+                auto a1 = (rt & 0x3e0) << 6;
+                auto a2 = (rt & 0x7c00) << 9;
+                auto a3 = (rt & 0x8000) << 16;
+
+                a3 = a3 | a2 | a1 | a0;
+                return a3;
+            */
         }
 
         /**
@@ -1278,6 +1326,18 @@ namespace ee
                 packed |= (unpacked & (1 << 31)) >> 16;
                 cpu.set_gpr<uint32_t>(dest, packed, i);
             }
+
+            /*
+                auto rt = simd::load<uint32_t>(barr.data());
+
+                auto a0 = (rt & 0xF8) >> 3;
+                auto a1 = (rt & 0xF800) >> 6;
+                auto a2 = (rt & 0xF80000) >> 9;
+                auto a3 = (rt & 0x80000000) >> 16;
+
+                a3 = a3 | a2 | a1 | a0;
+                return a3;
+            */
         }
 
         void mmi1(EE_InstrInfo &info, uint32_t instruction)
@@ -1434,6 +1494,12 @@ namespace ee
                 else
                     cpu.set_gpr<uint32_t>(dest, word, i);
             }
+
+            /*
+                auto rs = simd::load<int32_t>(barr.data());
+                auto clamped = simd::select<int32_t>(rs, 0x7FFFFFFF, rs == 0x80000000);
+                auto result = simd::abs(clamped);
+            */
         }
 
         /**
@@ -1459,6 +1525,12 @@ namespace ee
             }
 
             cpu.set_gpr<uint128_t>(dest, dest_qw);
+
+            /*
+                auto rs = simd::load<int32_t>(barr.data());
+                auto rt = simd::load<int32_t>(barr2.data());
+                auto result = rs == rt;
+            */
         }
 
         /**
@@ -1479,6 +1551,12 @@ namespace ee
                 else
                     cpu.set_gpr<int32_t>(dest, b, i);
             }
+
+            /*
+               auto rs = simd::load<int32_t>(barr.data());
+               auto rt = simd::load<int32_t>(barr2.data());
+               auto result = simd::min(rs, rt);
+            */
         }
 
         /**
@@ -1500,6 +1578,12 @@ namespace ee
                 else
                     cpu.set_gpr<uint16_t>(dest, halfword, i);
             }
+
+            /*
+                auto rs = simd::load<unt16_t>(barr.data());
+                auto clamped = simd::select<uint16_t>(rs, 0x7FFF, rs == 0x8000);
+                auto result = simd::abs(clamped);
+            */
         }
 
         /**
@@ -1525,6 +1609,12 @@ namespace ee
             }
 
             cpu.set_gpr<uint128_t>(dest, dest_qw);
+
+            /*
+                auto rs = simd::load<unt16_t>(barr.data());
+                auto rt = simd::load<unt16_t>(barr2.data());
+                auto result = rs == rt;
+            */
         }
 
         /**
@@ -1546,6 +1636,17 @@ namespace ee
                 cpu.set_gpr<int16_t>(dest, hw1, i);
                 cpu.set_gpr<int16_t>(dest, hw2, i + 4);
             }
+
+            /*
+                auto rs = simd::load<int16_t>(barr.data());
+                auto rt = simd::load<int16_t>(barr.data());
+
+                static int16_t mask[8] = { -1, -1, -1, -1, 1, 1, 1, 1 };
+                rt = simd::negate(rt, simd::load<int16_t>(mask));
+
+                auto result = rs + rt;
+                return result;
+            */
         }
 
         /**

@@ -102,7 +102,18 @@ namespace ee
 
         //Each register is 128-bit
         alignas(16) uint8_t gpr[32 * sizeof(uint64_t) * 2];
-        alignas(16) uint128_t LO, HI;
+        
+        /* Using this we can load LO and HI in the same AVX register thus
+           improving performance */
+        union
+        {
+            uint128_t LO_HI[2];
+            struct
+            {
+                uint128_t LO, HI;
+            };
+        };
+        
         uint32_t PC, new_PC;
         uint64_t SA;
 

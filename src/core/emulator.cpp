@@ -1820,7 +1820,7 @@ namespace core
         }
         while (len)
         {
-            ee_log << iop->ram[pointer & 0x1FFFFF];
+            ee_log << (char)iop->ram[pointer & 0x1FFFFF];
             fmt::print("[CORE] puts: {}\n", iop->ram[pointer & 0x1FFFFF]);
             pointer++;
             len--;
